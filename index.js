@@ -4,6 +4,7 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 const TelegramBot = require('node-telegram-bot-api');
+const proxyChain = require('proxy-chain');
 // Removed Axios imports
 
 // Configurações do Telegram
@@ -56,20 +57,30 @@ async function humanClick(page, selector) {
 async function checkCitas() {
     console.log(`[${new Date().toISOString()}] Iniciando verificação de citas para ${PROVINCE_NAME}...`);
     let browser;
+    let anonymizedProxy;
     let isBlockedError = false;
 
     try {
+        const puppeteerArgs = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--disable-gpu'
+        ];
+
+        const proxy = process.env.PROXY_URL;
+        if (proxy) {
+            console.log('🌐 Configurando proxy residencial via proxy-chain...');
+            anonymizedProxy = await proxyChain.anonymizeProxy(proxy);
+            puppeteerArgs.push(`--proxy-server=${anonymizedProxy}`);
+        }
+
         browser = await puppeteer.launch({
             headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
             userDataDir: './user_data',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
-            ]
+            args: puppeteerArgs
         });
         const page = await browser.newPage();
         
@@ -339,6 +350,9 @@ async function checkCitas() {
     } finally {
         if (browser) {
             await browser.close();
+        }
+        if (anonymizedProxy) {
+            await proxyChain.closeAnonymizedProxy(anonymizedProxy, true).catch(() => {});
         }
     }
 
