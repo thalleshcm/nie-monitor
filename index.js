@@ -5,7 +5,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 const TelegramBot = require('node-telegram-bot-api');
 const proxyChain = require('proxy-chain');
-// Removed Axios imports
+const axios = require('axios'); // Necessário para os health checks do proxy
 
 // Configurações do Telegram
 const token = process.env.TELEGRAM_BOT_TOKEN || '8706451717:AAGDRgNsCpm1KbXcVInzT_4s8lngJV6TwWg';
@@ -28,6 +28,31 @@ const PROXIES = [
   '31.58.9.4:6077:sxrbolaa:s5zgo6lanpzq',
   '104.239.107.47:5699:sxrbolaa:s5zgo6lanpzq'
 ];
+
+// Proxies que falharam ficam na "geladeira" (cooldown) por X tempo
+const proxyCooldowns = new Map();
+const PROXY_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutos
+
+async function checkProxyHealth(proxyUrl) {
+    try {
+        const url = new URL(proxyUrl);
+        const proxyConfig = {
+            host: url.hostname,
+            port: parseInt(url.port),
+            auth: {
+                username: decodeURIComponent(url.username),
+                password: decodeURIComponent(url.password)
+            }
+        };
+        const res = await axios.get('https://httpbin.org/ip', {
+            proxy: proxyConfig,
+            timeout: 10000
+        });
+        return res.data.origin; // O IP real detectado
+    } catch (e) {
+        return null;
+    }
+}
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -79,16 +104,53 @@ async function checkCitas() {
             '--disable-setuid-sandbox',
             '--disable-blink-features=AutomationControlled',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--disable-extensions',
+            '--no-zygote',
+            '--single-process'
         ];
 
-        const randomProxyConfig = PROXIES[Math.floor(Math.random() * PROXIES.length)];
-        const [ip, port, user, pass] = randomProxyConfig.split(':');
-        const proxyUrl = `http://${user}:${pass}@${ip}:${port}`;
-        
-        console.log(`🌐 Configurando proxy rotativo: ${ip}`);
-        anonymizedProxy = await proxyChain.anonymizeProxy(proxyUrl);
-        puppeteerArgs.push(`--proxy-server=${anonymizedProxy}`);
+        let selectedProxyConfig = null;
+        let proxyUrl = null;
+        let realIp = null;
+
+        // Tenta achar um proxy bom e vivo
+        const now = Date.now();
+        const availableProxies = PROXIES.filter(p => !proxyCooldowns.has(p) || proxyCooldowns.get(p) < now);
+
+        if (availableProxies.length > 0) {
+            // Tenta até encontrar um que responda no ping, ou acabar os disponíveis
+            for (let i = 0; i < availableProxies.length; i++) {
+                const randomProxyConfig = availableProxies[Math.floor(Math.random() * availableProxies.length)];
+                const [ip, port, user, pass] = randomProxyConfig.split(':');
+                const testUrl = `http://${user}:${pass}@${ip}:${port}`;
+                
+                console.log(`🌐 Testando proxy candidato: ${ip}...`);
+                const testResultIp = await checkProxyHealth(testUrl);
+                
+                if (testResultIp) {
+                    selectedProxyConfig = randomProxyConfig;
+                    proxyUrl = testUrl;
+                    realIp = testResultIp;
+                    console.log(`✅ Proxy validado. IP público reportado: ${realIp}`);
+                    break;
+                } else {
+                    console.log(`❌ Proxy ${ip} falhou no health check. Colocando na geladeira por 30m.`);
+                    proxyCooldowns.set(randomProxyConfig, Date.now() + PROXY_COOLDOWN_MS);
+                }
+            }
+        } else {
+             console.log('⚠️ Aviso: Todos os proxies estão na geladeira (em cooldown)!');
+        }
+
+        if (proxyUrl) {
+            console.log(`🌐 Aplicando proxy no Puppeteer: ${proxyUrl.split('@')[1].split(':')[0]}`);
+            anonymizedProxy = await proxyChain.anonymizeProxy(proxyUrl);
+            puppeteerArgs.push(`--proxy-server=${anonymizedProxy}`);
+        } else {
+            console.log('⚠️ Nenhum proxy vivo. Tentando conexão DIRETA (sem proxy) como último recurso...');
+        }
 
         browser = await puppeteer.launch({
             headless: true,
@@ -351,13 +413,22 @@ async function checkCitas() {
     } catch (error) {
         console.error(`❌ Erro durante a verificação: ${error.message}`);
         
-        // Verifica se o erro indica um bloqueio de conexão
+        // Verifica se o erro indica um bloqueio de conexão ou timeout
         if (error.message.includes('ERR_CONNECTION_TIMED_OUT') || 
             error.message.includes('ERR_CONNECTION_REFUSED') ||
             error.message.includes('ERR_NAME_NOT_RESOLVED') ||
             error.message.includes('Navigation timeout')) {
             isBlockedError = 'BLOCKED';
-            console.log('⚠️ Possível bloqueio de IP detectado pelo firewall. Aumentando o tempo de espera da próxima iteração...');
+            console.log('⚠️ Possível falha de conexão do Proxy ou WAF severo.');
+            
+            // Penaliza o proxy atual (se estava usando um)
+            if (proxyUrl) {
+                 const configKey = PROXIES.find(p => p.includes(proxyUrl.split('@')[1].split(':')[0]));
+                 if (configKey) {
+                     console.log(`❌ Penalizando proxy instável: ${configKey.split(':')[0]} (30m cooldown)`);
+                     proxyCooldowns.set(configKey, Date.now() + PROXY_COOLDOWN_MS);
+                 }
+            }
         } else {
             isBlockedError = 'ERROR';
         }
