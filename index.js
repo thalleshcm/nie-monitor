@@ -16,6 +16,19 @@ const DEFAULT_INTERVAL_MINUTES = 8;
 const BLOCK_INTERVAL_MINUTES = 10;
 const PROVINCE_NAME = 'Valencia';
 
+const PROXIES = [
+  '31.59.20.176:6754:sxrbolaa:s5zgo6lanpzq',
+  '198.23.239.134:6540:sxrbolaa:s5zgo6lanpzq',
+  '45.38.107.97:6014:sxrbolaa:s5zgo6lanpzq',
+  '107.172.163.27:6543:sxrbolaa:s5zgo6lanpzq',
+  '198.105.121.200:6462:sxrbolaa:s5zgo6lanpzq',
+  '216.10.27.159:6837:sxrbolaa:s5zgo6lanpzq',
+  '142.111.67.146:5611:sxrbolaa:s5zgo6lanpzq',
+  '191.96.254.138:6185:sxrbolaa:s5zgo6lanpzq',
+  '31.58.9.4:6077:sxrbolaa:s5zgo6lanpzq',
+  '104.239.107.47:5699:sxrbolaa:s5zgo6lanpzq'
+];
+
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -69,12 +82,13 @@ async function checkCitas() {
             '--disable-gpu'
         ];
 
-        const proxy = process.env.PROXY_URL;
-        if (proxy) {
-            console.log('🌐 Configurando proxy residencial via proxy-chain...');
-            anonymizedProxy = await proxyChain.anonymizeProxy(proxy);
-            puppeteerArgs.push(`--proxy-server=${anonymizedProxy}`);
-        }
+        const randomProxyConfig = PROXIES[Math.floor(Math.random() * PROXIES.length)];
+        const [ip, port, user, pass] = randomProxyConfig.split(':');
+        const proxyUrl = `http://${user}:${pass}@${ip}:${port}`;
+        
+        console.log(`🌐 Configurando proxy rotativo: ${ip}`);
+        anonymizedProxy = await proxyChain.anonymizeProxy(proxyUrl);
+        puppeteerArgs.push(`--proxy-server=${anonymizedProxy}`);
 
         browser = await puppeteer.launch({
             headless: true,
@@ -380,9 +394,13 @@ async function startMonitor() {
     while (true) {
         let status = await checkCitas();
         
-        // Se foi bloqueado aguarda 10 minutos, senão o normal (8 minutos)
-        const minutesToWait = (status === 'BLOCKED' || status === 'ERROR' || status === 'WAF') ? BLOCK_INTERVAL_MINUTES : DEFAULT_INTERVAL_MINUTES;
+        if (status === 'BLOCKED' || status === 'ERROR' || status === 'WAF') {
+            console.log(`⚠️ Tentativa abortada com status ${status}. Tentando próximo proxy em 15 segundos...`);
+            await new Promise(resolve => setTimeout(resolve, 15000));
+            continue;
+        }
         
+        const minutesToWait = DEFAULT_INTERVAL_MINUTES;
         const now = new Date();
         const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
         
@@ -390,8 +408,6 @@ async function startMonitor() {
             console.log(`[${timeStr}] ❌ Sem vagas disponíveis. Próxima tentativa em ${minutesToWait} minutos.`);
         } else if (status === 'FOUND') {
             console.log(`[${timeStr}] 🎉 Vagas encontradas! Próxima tentativa em ${minutesToWait} minutos.`);
-        } else {
-            console.log(`[${timeStr}] ⚠️ Tentativa abortada com status ${status}. Próxima tentativa em ${minutesToWait} minutos.`);
         }
         
         // Espera o tempo especificado
